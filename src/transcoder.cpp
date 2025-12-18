@@ -58,8 +58,8 @@ MatVideoEncoder::MatVideoEncoder(const std::string &codec_name,
   codec_ctx_->height = height_;
   codec_ctx_->time_base = {1, fps_};
   codec_ctx_->framerate = {fps_, 1};
-  codec_ctx_->gop_size = 15;
-  codec_ctx_->max_b_frames = 15;
+  codec_ctx_->gop_size = 24;
+  codec_ctx_->max_b_frames = 24;
   codec_ctx_->pix_fmt = AV_PIX_FMT_YUV420P;
 
   if (codec->id == AV_CODEC_ID_H264)

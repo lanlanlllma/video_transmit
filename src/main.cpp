@@ -88,7 +88,7 @@ int main(int argc, char **argv)
   try
   {
     // 打开视频源（当前默认使用 videos/test_video1.mp4）
-    const std::string input_video = "./videos/test_video1.mp4";
+    const std::string input_video = "/Users/mading/video_transmit/rm_test_video/test_video1.mp4";
     cv::VideoCapture cap(input_video);
     if (!cap.isOpened())
     {
@@ -127,14 +127,14 @@ int main(int argc, char **argv)
     // 预处理参数，参考 compress_av1.py 注释示例
     FramePreprocessor preprocessor(
         /*blur=*/0,
-        /*posterize=*/0,
+        /*posterize=*/16,
         /*gamma=*/2.0,
         /*lut_type=*/"shadow",
         /*shadow_threshold=*/50,
         /*shadow_gain=*/8.0,
         /*gray=*/true,
         /*crop_top_ratio=*/0.0,
-        /*bitshift=*/4,
+        /*bitshift=*/0,
         /*edge_enhance=*/1.0,
         /*high_freq_boost=*/1.0,
         /*shadow_floor=*/30,
@@ -205,6 +205,17 @@ int main(int argc, char **argv)
       else
       {
         gray = resized;
+      }
+      if (debug)
+      {
+        cv::imshow("preprocessed_final_gray", gray);
+        // 使用很短的等待时间，避免严重阻塞编码流程
+        int key = cv::waitKey(1);
+        if (key == 27) // ESC 退出预览但继续编码
+        {
+          // 用户可按 ESC 停止后续显示
+          debug = false;
+        }
       }
 
       cv::Mat bitstream;
