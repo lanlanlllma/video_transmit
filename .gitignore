@@ -1,0 +1,7 @@
+.venv
+.vscode/
+build/
+videos/
+*.csv
+*.mp4
+*.png
