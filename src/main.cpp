@@ -3,11 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <opencv2/opencv.hpp>
 
+#include "bitstream_packetizer.h"
 #include "compressed_stream_pipeline.h"
 #include "pipeline_config.h"
 
@@ -91,19 +91,13 @@ int main(int argc, char **argv)
     PipelineConfig pcfg;
     if (!PipelineConfig::load(args.config, pcfg))
     {
-      std::fprintf(csv, "frame,encode_time_ms,bytes\n");
+        std::fprintf(stderr, "Failed to load config: %s\n", args.config.c_str());
+        return 1;
     }
-    else
-    {
-      std::perror("fopen csv");
-    }
-  }
+    pcfg.print();
 
-  try
-  {
-    // 打开视频源（当前默认使用 videos/test_video1.mp4）
-    const std::string input_video = "./videos/test_video1.mp4";
-    cv::VideoCapture cap(input_video);
+    // 打开视频源
+    cv::VideoCapture cap(args.input);
     if (!cap.isOpened())
     {
         std::fprintf(stderr, "Failed to open input video: %s\n", args.input.c_str());
@@ -117,14 +111,11 @@ int main(int argc, char **argv)
     int src_width = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_WIDTH));
     int src_height = static_cast<int>(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
 
-    // 帧率转换: 使用配置中的 input_fps 作为基准
     double input_fps = pcfg.input_fps;
     double encode_fps = static_cast<double>(pcfg.encode_fps);
 
     std::printf("Input: %s (%dx%d, %.2f fps, %d frames)\n",
                 args.input.c_str(), src_width, src_height, src_fps, total_frames);
-    std::printf("Config: input_fps=%.1f, encode_fps=%.0f\n", input_fps, encode_fps);
-    // std::printf("Output: %s\n", args.output.c_str());
     std::printf("Encode: %dx%d @ %dfps, bitrate=%d bps, gop=%d\n",
                 pcfg.encode_width, pcfg.encode_height, pcfg.encode_fps,
                 pcfg.bitrate, pcfg.gop);
@@ -134,29 +125,62 @@ int main(int argc, char **argv)
                 static_cast<int>(BitstreamPacketizer::PACKET_SIZE * 8 *
                                  BitstreamPacketizer::SEND_RATE_HZ));
 
-    // 预处理参数，参考 compress_av1.py 注释示例
-    FramePreprocessor preprocessor(
-        /*blur=*/0,
-        /*posterize=*/0,
-        /*gamma=*/2.0,
-        /*lut_type=*/"shadow",
-        /*shadow_threshold=*/50,
-        /*shadow_gain=*/8.0,
-        /*gray=*/true,
-        /*crop_top_ratio=*/0.0,
-        /*bitshift=*/4,
-        /*edge_enhance=*/1.0,
-        /*high_freq_boost=*/1.0,
-        /*shadow_floor=*/30,
-        /*motion_enhance=*/1.0,
-        /*motion_threshold=*/3,
-        /*motion_dilation=*/5,
-        /*highlight_roof=*/125);
+    // 构建管线配置 (从共享配置映射)
+    CompressedStreamPipeline::Config cfg;
+    cfg.encode_width = pcfg.encode_width;
+    cfg.encode_height = pcfg.encode_height;
+    cfg.fps = pcfg.encode_fps;
+    cfg.bitrate = pcfg.bitrate;
+    cfg.max_bitrate = pcfg.bitrate;
+    cfg.gop_size = pcfg.gop;
+    cfg.cpu_used = pcfg.cpu_used;
+    cfg.encoder_threads = pcfg.encoder_threads;
+    cfg.bitshift = pcfg.bitshift;
+    cfg.gamma = pcfg.gamma;
+    cfg.shadow_gain = pcfg.shadow_gain;
+    cfg.shadow_threshold = pcfg.shadow_threshold;
+    cfg.shadow_floor = pcfg.shadow_floor;
+    cfg.highlight_roof = pcfg.highlight_roof;
+    cfg.edge_enhance = pcfg.edge_enhance;
+    cfg.high_freq_boost = pcfg.high_freq_boost;
+    cfg.motion_enhance = pcfg.motion_enhance;
+    cfg.center_crop_ratio = pcfg.center_crop;
+    cfg.gray = true;
+    // 当 shadow_gain > 1 时启用 shadow LUT
+    cfg.lut_type = (pcfg.shadow_gain > 1.0) ? "shadow" : "none";
 
-    // AV1 码率设置，参考示例 --bitrate 60000（单位 bit/s）
-    int target_bitrate = 60000;
-    MatVideoEncoder encoder(codec_name, width, height, target_bitrate, static_cast<int>(target_fps));
+    CompressedStreamPipeline pipeline(cfg);
 
+    // 打开输出文件
+    FILE *out_file = std::fopen(args.output.c_str(), "wb");
+    if (!out_file)
+    {
+        std::fprintf(stderr, "Failed to open output file: %s\n", args.output.c_str());
+        return 1;
+    }
+
+    size_t total_packets_written = 0;
+
+    // 设置包输出回调: 写入文件
+    pipeline.setPacketCallback([&](const BitstreamPacketizer::Packet &pkt) {
+        std::fwrite(pkt.data, 1, BitstreamPacketizer::PACKET_SIZE, out_file);
+        ++total_packets_written;
+    });
+
+    // 设置调试回调
+    bool debug = args.debug;
+    if (debug)
+    {
+        pipeline.setDebugFrameCallback([&debug](const cv::Mat &frame) {
+            cv::imshow("Preprocessed", frame);
+            int key = cv::waitKey(1);
+            if (key == 27) // ESC 关闭预览
+                debug = false;
+        });
+    }
+
+    // 帧率转换: 累加器方式, 均匀跳帧
+    double acc = 0.0;
     int src_frame_index = 0;
     int encoded_frames = 0;
     auto start_time = std::chrono::steady_clock::now();
@@ -169,63 +193,31 @@ int main(int argc, char **argv)
             break;
         }
 
-      ++src_frame_index;
-      if (src_frame_index % frame_skip != 0)
-      {
-        continue; // 跳帧以降低帧率
-      }
+        ++src_frame_index;
 
-      // 预处理管线：裁剪/灰度/增强等
-      // 拆成“bitshift 前”和“bitshift 后”两步，方便 debug 可视化
-      double center_ratio = 1.0;
-      cv::Mat pre = preprocessor.cropTop(bgr);
-      pre = preprocessor.cropCenterRatio(pre, center_ratio);
-      pre = preprocessor.toGrayscale(pre);
-      pre = preprocessor.process(pre);
-
-      if (debug)
-      {
-        cv::imshow("preprocessed_before_bitshift", pre);
-        // 使用很短的等待时间，避免严重阻塞编码流程
-        int key = cv::waitKey(1);
-        if (key == 27) // ESC 退出预览但继续编码
+        // 帧率转换: 跳帧以匹配目标帧率
+        acc += encode_fps;
+        if (acc < input_fps)
         {
-          // 用户可按 ESC 停止后续显示
-          debug = false;
+            continue;
         }
-      }
+        acc -= input_fps;
 
-      cv::Mat processed = preprocessor.applyBitshift(pre);
+        // 编码
+        if (!pipeline.feedFrame(bgr))
+        {
+            std::fprintf(stderr, "feedFrame() failed on frame %d\n", encoded_frames);
+        }
+        ++encoded_frames;
 
-      // 调整到编码分辨率
-      cv::Mat resized;
-      if (processed.cols != width || processed.rows != height)
-      {
-        cv::resize(processed, resized, cv::Size(width, height), 0, 0, cv::INTER_AREA);
-      }
-      else
-      {
-        resized = processed;
-      }
+        // 产生对应的输出包
+        while (pipeline.bufferedBytes() > 0)
+        {
+            pipeline.producePacket();
+        }
 
-      // MatVideoEncoder 目前接受 CV_8UC1（灰度）
-      cv::Mat gray;
-      if (resized.channels() == 3)
-      {
-        cv::cvtColor(resized, gray, cv::COLOR_BGR2GRAY);
-      }
-      else
-      {
-        gray = resized;
-      }
-
-      cv::Mat bitstream;
-      auto start = std::chrono::high_resolution_clock::now();
-      if (!encoder.encode(gray, bitstream))
-      {
-        std::fprintf(stderr, "encode() failed on frame %d\n", encoded_frames);
-        std::fclose(f);
-        if (csv)
+        // 进度报告
+        if (encoded_frames % 50 == 0)
         {
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - start_time).count();
@@ -277,9 +269,6 @@ int main(int argc, char **argv)
                 total_packets_written * BitstreamPacketizer::PACKET_SIZE);
     std::printf("Effective bitrate: %.1f kbps\n",
                 total_packets_written * BitstreamPacketizer::PACKET_SIZE * 8.0 /
-                    total_elapsed / 1000.0);
-    std::printf("Overall bitrate (including dropped data): %.1f kbps\n",
-                (total_packets_written * BitstreamPacketizer::PACKET_SIZE + pipeline.droppedBytes()) * 8.0 /
                     total_elapsed / 1000.0);
 
     return 0;
