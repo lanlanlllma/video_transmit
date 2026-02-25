@@ -1,0 +1,39 @@
+# 管线共享配置文件
+# 编码器 (video_compress) 和解码器 (decode_packets) 共用此文件
+# 默认路径: ./config.yaml, 可通过 --config <path> 覆盖
+
+# 输入视频参数
+input:
+  fps: 30.0          # 输入视频帧率 (固定值)
+
+# 编码参数
+encode:
+  width: 720          # 编码宽度 (像素, 必须为偶数)
+  height: 720         # 编码高度 (像素, 必须为偶数)
+  fps: 16             # 编码目标帧率
+  bitrate: 90000     # 目标码率 (bit/s), 120000 = 300字节 * 8 * 50Hz
+  gop: 16             # 关键帧间隔 (帧数), 影响丢包恢复延迟
+  cpu_used: 4         # libaom 速度等级 (0=最慢最优, 8=实时)
+  threads: 4          # 编码线程数
+
+# 预处理参数
+preprocess:
+  bitshift: 2         # 比特右移位数 (0-7), 压缩动态范围
+  gamma: 0.8          # Gamma 校正值
+  shadow_gain: 1.4    # 暗部提升倍数
+  shadow_threshold: 64 # 暗部阈值
+  shadow_floor: 32     # 暗部舍弃阈值 (低于此值置零)
+  highlight_roof: 225 # 高亮舍弃阈值 (高于此值截断)
+  edge_enhance: 0.8   # 边缘增强 (0-1)
+  high_freq_boost: 0.5 # 高频增强 (0-1)
+  motion_enhance: 1.0 # 运动增强 (0-1)
+  center_crop: 1.0    # 中心裁剪比例 (0-1, 1.0=不裁剪)
+
+# 解码参数
+decode:
+  threads: 0          # 解码线程数 (0=自动)
+  prefer_dav1d: true  # 优先使用 libdav1d 解码器
+
+# 输出参数
+output:
+  fps: 24.0           # 输出视频帧率 (通常与 encode.fps 一致)
